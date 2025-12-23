@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Extract table of contents (outline/bookmarks) from PDF files.
-Includes automatic generation for PDFs without embedded bookmarks.
+Extract table of contents from PDF files using TOC page detection.
+Focuses on detecting actual table of contents pages and parsing their contents.
 """
 
 import sys
@@ -10,25 +10,26 @@ from PyPDF2 import PdfReader
 from typing import Dict, List, Optional
 from argparse import ArgumentParser
 
-# Import modules locally for TOC generation
+# Import new TOC detection modules
 try:
-    from heading_detector import HeadingDetector
-    from pdf_analyzer import PDFAnalyzer
-    from toc_generator import TOCGenerator
-    AUTO_GENERATE_AVAILABLE = True
+    from toc_page_analyzer import TOCPAGEAnalyzer, TOCPageResult
+    from toc_pattern_matcher import TOCPatternMatcher, TOCFormat
+    TOC_DETECTION_AVAILABLE = True
 except ImportError:
-    AUTO_GENERATE_AVAILABLE = False
+    TOC_DETECTION_AVAILABLE = False
 
 
-def extract_pdf_toc(pdf_path: str, auto_generate: bool = False,
-                   confidence_threshold: float = 0.7, quiet: bool = False) -> List[Dict]:
+def extract_pdf_toc(pdf_path: str,
+                   auto_detect_toc: bool = False,
+                   toc_page_threshold: float = 0.6,
+                   quiet: bool = False) -> List[Dict]:
     """
     Extract table of contents from a PDF file.
 
     Args:
         pdf_path: Path to the PDF file
-        auto_generate: If True, attempt to generate TOC for PDFs without bookmarks
-        confidence_threshold: Minimum confidence for generated TOC entries (0-1)
+        auto_detect_toc: If True, try to detect TOC pages if no bookmarks found
+        toc_page_threshold: Minimum confidence for TOC page detection
         quiet: Suppress warning messages
 
     Returns:
@@ -38,16 +39,16 @@ def extract_pdf_toc(pdf_path: str, auto_generate: bool = False,
         # First try standard bookmark extraction
         toc = extract_bookmarks(pdf_path)
 
-        # If no bookmarks found and auto-generation is enabled, try that
-        if not toc and auto_generate and AUTO_GENERATE_AVAILABLE:
+        # If no bookmarks found and auto-detection is enabled, try TOC page detection
+        if not toc and auto_detect_toc and TOC_DETECTION_AVAILABLE:
             if not quiet:
-                print("No bookmarks found. Attempting to generate table of contents...", file=sys.stderr)
-            toc = generate_toc_from_content(pdf_path, confidence_threshold)
+                print("No bookmarks found. Attempting to detect table of contents pages...", file=sys.stderr)
+            toc = detect_and_parse_toc_pages(pdf_path, toc_page_threshold, quiet)
             if toc and not quiet:
-                print(f"Generated {len(toc)} TOC entries with confidence threshold {confidence_threshold}", file=sys.stderr)
-        elif not toc and auto_generate and not AUTO_GENERATE_AVAILABLE:
+                print(f"Detected TOC on pages and extracted {len(toc)} entries", file=sys.stderr)
+        elif not toc and auto_detect_toc and not TOC_DETECTION_AVAILABLE:
             if not quiet:
-                print("Auto-generation not available (required modules not installed)", file=sys.stderr)
+                print("TOC detection not available (required modules not installed)", file=sys.stderr)
 
         return toc
 
@@ -86,56 +87,75 @@ def extract_bookmarks(pdf_path: str, quiet: bool = False) -> List[Dict]:
         return []
 
 
-def generate_toc_from_content(pdf_path: str, confidence_threshold: float = 0.7) -> List[Dict]:
+def detect_and_parse_toc_pages(pdf_path: str, threshold: float = 0.6, quiet: bool = False) -> List[Dict]:
     """
-    Generate TOC by analyzing PDF content structure.
+    Detect TOC pages and parse their contents.
 
     Args:
         pdf_path: Path to the PDF file
-        confidence_threshold: Minimum confidence for TOC entries
+        threshold: Minimum confidence for TOC detection
+        quiet: Suppress progress messages
 
     Returns:
-        Generated TOC list
+        Extracted TOC entries
     """
-    if not AUTO_GENERATE_AVAILABLE:
-        raise Exception("TOC generation modules not available")
+    if not TOC_DETECTION_AVAILABLE:
+        raise Exception("TOC detection modules not available")
 
     try:
-        # Analyze PDF structure
-        analyzer = PDFAnalyzer()
-        pdf_data = analyzer.analyze_pdf(pdf_path)
+        # Create analyzer
+        analyzer = TOCPAGEAnalyzer()
 
-        if not pdf_data.get('text_elements'):
-            return []
+        if not quiet:
+            print("Analyzing pages for table of contents...", file=sys.stderr)
 
-        # Detect headings
-        detector = HeadingDetector(confidence_threshold)
-        headings = detector.detect_headings(pdf_data['text_elements'])
+        # Analyze PDF for TOC pages
+        results = analyzer.analyze_pdf(pdf_path, max_pages=10)
 
-        if not headings:
-            return []
+        # Convert results to standard format
+        if results:
+            # Apply threshold if specified
+            valid_results = [r for r in results if r.confidence >= threshold]
 
-        # Generate TOC
-        generator = TOCGenerator(confidence_threshold)
-        toc = generator.generate_toc(headings)
+            if valid_results:
+                # Combine all results (in case of multi-page TOC)
+                all_entries = []
+                cumulative_confidence = 0
 
-        # Convert to standard format
-        formatted_toc = []
-        for entry in toc:
-            # Ensure consistent format with PyPDF2 bookmarks
-            formatted_entry = {
-                'title': entry['title'],
-                'pageNumber': entry['pageNumber'],
-                'level': entry['level'],
-                'confidence': entry['confidence'],
-                'detection_method': entry.get('detection_method', 'unknown')
-            }
-            formatted_toc.append(formatted_entry)
+                for result in valid_results:
+                    all_entries.extend(result.entries)
+                    cumulative_confidence += result.confidence
 
-        return formatted_toc
+                # Generate consistent format
+                standard_entries = []
+                for entry in all_entries:
+                    standard_entry = {
+                        'title': entry['title'],
+                        'pageNumber': entry['pageNumber'],
+                        'level': entry['level'],
+                        'confidence': entry['confidence'],
+                        'detection_method': entry.get('detection_method', 'unknown')
+                    }
+                    standard_entries.append(standard_entry)
+
+                # Remove duplicates if any
+                seen = set()
+                unique_entries = []
+                for entry in standard_entries:
+                    key = (entry['title'], entry['pageNumber'])
+                    if key not in seen:
+                        seen.add(key)
+                        unique_entries.append(entry)
+
+                # Sort by page number
+                unique_entries.sort(key=lambda x: x['pageNumber'])
+
+                return unique_entries
+
+        return []
 
     except Exception as e:
-        raise Exception(f"Error generating TOC: {str(e)}")
+        raise Exception(f"Error detecting TOC pages: {str(e)}")
 
 
 def process_outline_items(items: List, toc: List[Dict], level: int = 0) -> None:
@@ -205,6 +225,13 @@ def toc_to_text(toc: List[Dict], show_confidence: bool = False) -> str:
     lines = ["\nPDF Table of Contents:\n"]
     lines.append("=" * 50)
 
+    # Show generation method info
+    has_generated = any('confidence' in item for item in toc)
+    if has_generated:
+        avg_conf = sum(item.get('confidence', 0.5) for item in toc) / len(toc)
+        lines.append(f"Auto-detected TOC (avg confidence: {avg_conf:.2f})")
+        lines.append("-" * 50)
+
     for item in toc:
         indent = "  " * item['level']
         page_str = f"Page {item['pageNumber']}" if item['pageNumber'] else "Unknown page"
@@ -217,8 +244,8 @@ def toc_to_text(toc: List[Dict], show_confidence: bool = False) -> str:
         lines.append(line)
 
         # Add detection method if available
-        if 'detection_method' in item and item['detection_method'] != 'unknown':
-            lines.append(f"{indent}  (Detected via: {item['detection_method']})")
+        if show_confidence and 'detection_method' in item:
+            lines.append(f"{indent}  (Extracted from TOC page)")
 
     return "\n".join(lines)
 
@@ -243,46 +270,47 @@ def main():
     """
     Main function for CLI usage.
     """
-    parser = ArgumentParser(description="Extract or generate table of contents from PDF files")
+    parser = ArgumentParser(description="Extract table of contents from PDF files using pool detection")
     parser.add_argument("pdf_file", help="Path to the PDF file")
     parser.add_argument("--json", action="store_true",
-                       help="Output as JSON instead of text")
+                       help="Output as JSON")
     parser.add_argument("--pretty", action="store_true",
                        help="Pretty-print JSON output")
-    parser.add_argument("--generate-if-missing", "-g", action="store_true",
-                       help="Generate TOC for PDFs without bookmarks")
-    parser.add_argument("--confidence-threshold", "-c", type=float, default=0.7,
-                       help="Minimum confidence for generated TOC entries (0-1, default: 0.7)")
+    parser.add_argument("--detect-toc", "-d", action="store_true",
+                       help="Auto-detect table of contents pages if no bookmarks found")
+    parser.add_argument("--toc-threshold", "-t", type=float, default=0.6,
+                       help="Minimum confidence for TOC page detection (0-1, default 0.6)")
     parser.add_argument("--quiet", "-q", action="store_true",
-                       help="Suppress warning messages")
+                       help="Suppress messages")
 
     args = parser.parse_args()
 
+    # Set auto-detect based on user selection
+    auto_detect = args.detect_toc
+
     # Extract TOC
-    auto_generate = args.generate_if_missing or args.confidence_threshold != 0.7
     toc = extract_pdf_toc(
         args.pdf_file,
-        auto_generate=auto_generate,
-        confidence_threshold=args.confidence_threshold,
+        auto_detect_toc=auto_detect,
+        toc_page_threshold=args.toc_threshold,
         quiet=args.quiet
     )
+
+    # Output results summary
+    if args.quiet == False:
+        if args.detect_toc and toc and any('confidence' in item for item in toc):
+            print(f"Detected {len(toc)} TOC entries from pages")
+        elif not auto_detect and toc:
+            print(f"Found {len(toc)} bookmarks in this PDF")
+        elif toc:
+            print(f"Generated {len(toc)} TOC entries")
 
     # Output result
     if args.json:
         print(toc_to_json(toc, args.pretty))
     else:
-        show_confidence = auto_generate and any('confidence' in item for item in toc)
-
-        # Add information about generation method
-        if auto_generate and toc:
-            print(f"Generated {len(toc)} TOC entries with confidence threshold {args.confidence_threshold}")
-        elif not auto_generate and not toc:
-            print("No bookmarks found in this PDF.")
-        elif toc:
-            print(f"Found {len(toc)} bookmarks in this PDF.")
-
-        out = toc_to_text(toc, show_confidence)
-        print(out)
+        show_confidence = auto_detect and any('confidence' in item for item in toc)
+        print(toc_to_text(toc, show_confidence))
 
 
 if __name__ == "__main__":
