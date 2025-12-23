@@ -1,0 +1,22 @@
+{
+  "name": "pdf-toc-extractor",
+  "owner": {
+    "name": "Hualet",
+    "email": "your-email@example.com"
+  },
+  "metadata": {
+    "description": "PDF目录提取器 - 从PDF文档中提取目录（书签/大纲）结构",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "pdf-toc-extractor",
+      "description": "PDF目录提取器，支持文本和JSON格式输出",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./pdf-toc-extractor"
+      ]
+    }
+  ]
+}
