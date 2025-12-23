@@ -1,28 +1,75 @@
 #!/usr/bin/env python3
 """
 Extract table of contents (outline/bookmarks) from PDF files.
+Includes automatic generation for PDFs without embedded bookmarks.
 """
 
 import sys
 import json
 from PyPDF2 import PdfReader
 from typing import Dict, List, Optional
+from argparse import ArgumentParser
+
+# Import modules locally for TOC generation
+try:
+    from heading_detector import HeadingDetector
+    from pdf_analyzer import PDFAnalyzer
+    from toc_generator import TOCGenerator
+    AUTO_GENERATE_AVAILABLE = True
+except ImportError:
+    AUTO_GENERATE_AVAILABLE = False
 
 
-def extract_pdf_toc(pdf_path: str) -> List[Dict]:
+def extract_pdf_toc(pdf_path: str, auto_generate: bool = False,
+                   confidence_threshold: float = 0.7, quiet: bool = False) -> List[Dict]:
     """
     Extract table of contents from a PDF file.
 
     Args:
         pdf_path: Path to the PDF file
+        auto_generate: If True, attempt to generate TOC for PDFs without bookmarks
+        confidence_threshold: Minimum confidence for generated TOC entries (0-1)
+        quiet: Suppress warning messages
 
     Returns:
         List of dictionaries containing TOC entries with title, page number, and level
     """
     try:
-        reader = PdfReader(pdf_path)
+        # First try standard bookmark extraction
+        toc = extract_bookmarks(pdf_path)
 
-        # Get the outline (bookmarks)
+        # If no bookmarks found and auto-generation is enabled, try that
+        if not toc and auto_generate and AUTO_GENERATE_AVAILABLE:
+            if not quiet:
+                print("No bookmarks found. Attempting to generate table of contents...", file=sys.stderr)
+            toc = generate_toc_from_content(pdf_path, confidence_threshold)
+            if toc and not quiet:
+                print(f"Generated {len(toc)} TOC entries with confidence threshold {confidence_threshold}", file=sys.stderr)
+        elif not toc and auto_generate and not AUTO_GENERATE_AVAILABLE:
+            if not quiet:
+                print("Auto-generation not available (required modules not installed)", file=sys.stderr)
+
+        return toc
+
+    except Exception as e:
+        if not quiet:
+            print(f"Error reading PDF: {e}", file=sys.stderr)
+        return []
+
+
+def extract_bookmarks(pdf_path: str, quiet: bool = False) -> List[Dict]:
+    """
+    Extract bookmarks from PDF using PyPDF2.
+
+    Args:
+        pdf_path: Path to the PDF file
+        quiet: Suppress warnings
+
+    Returns:
+        List of bookmarks
+    """
+    try:
+        reader = PdfReader(pdf_path)
         outline = reader.outline
 
         if not outline:
@@ -31,12 +78,64 @@ def extract_pdf_toc(pdf_path: str) -> List[Dict]:
         # Convert outline to a structured list
         toc = []
         process_outline_items(outline, toc)
-
         return toc
 
     except Exception as e:
-        print(f"Error reading PDF: {e}", file=sys.stderr)
+        if not quiet:
+            print(f"Error reading bookmarks: {e}", file=sys.stderr)
         return []
+
+
+def generate_toc_from_content(pdf_path: str, confidence_threshold: float = 0.7) -> List[Dict]:
+    """
+    Generate TOC by analyzing PDF content structure.
+
+    Args:
+        pdf_path: Path to the PDF file
+        confidence_threshold: Minimum confidence for TOC entries
+
+    Returns:
+        Generated TOC list
+    """
+    if not AUTO_GENERATE_AVAILABLE:
+        raise Exception("TOC generation modules not available")
+
+    try:
+        # Analyze PDF structure
+        analyzer = PDFAnalyzer()
+        pdf_data = analyzer.analyze_pdf(pdf_path)
+
+        if not pdf_data.get('text_elements'):
+            return []
+
+        # Detect headings
+        detector = HeadingDetector(confidence_threshold)
+        headings = detector.detect_headings(pdf_data['text_elements'])
+
+        if not headings:
+            return []
+
+        # Generate TOC
+        generator = TOCGenerator(confidence_threshold)
+        toc = generator.generate_toc(headings)
+
+        # Convert to standard format
+        formatted_toc = []
+        for entry in toc:
+            # Ensure consistent format with PyPDF2 bookmarks
+            formatted_entry = {
+                'title': entry['title'],
+                'pageNumber': entry['pageNumber'],
+                'level': entry['level'],
+                'confidence': entry['confidence'],
+                'detection_method': entry.get('detection_method', 'unknown')
+            }
+            formatted_toc.append(formatted_entry)
+
+        return formatted_toc
+
+    except Exception as e:
+        raise Exception(f"Error generating TOC: {str(e)}")
 
 
 def process_outline_items(items: List, toc: List[Dict], level: int = 0) -> None:
@@ -89,12 +188,13 @@ def get_page_number(destination) -> Optional[int]:
         return None
 
 
-def toc_to_text(toc: List[Dict]) -> str:
+def toc_to_text(toc: List[Dict], show_confidence: bool = False) -> str:
     """
     Convert TOC list to a formatted text representation.
 
     Args:
         toc: List of TOC entries
+        show_confidence: Whether to include confidence scores for generated entries
 
     Returns:
         Formatted text representation
@@ -109,7 +209,16 @@ def toc_to_text(toc: List[Dict]) -> str:
         indent = "  " * item['level']
         page_str = f"Page {item['pageNumber']}" if item['pageNumber'] else "Unknown page"
         line = f"{indent}{item['title']} - {page_str}"
+
+        # Add confidence if requested and available
+        if show_confidence and 'confidence' in item:
+            line += f" [{item['confidence']:.2f}]"
+
         lines.append(line)
+
+        # Add detection method if available
+        if 'detection_method' in item and item['detection_method'] != 'unknown':
+            lines.append(f"{indent}  (Detected via: {item['detection_method']})")
 
     return "\n".join(lines)
 
@@ -134,26 +243,46 @@ def main():
     """
     Main function for CLI usage.
     """
-    if len(sys.argv) < 2:
-        print("Usage: python extract_toc.py [OPTIONS] <pdf_file>", file=sys.stderr)
-        print("Options:", file=sys.stderr)
-        print("  --json    Output as JSON instead of text", file=sys.stderr)
-        print("  --pretty  Pretty-print JSON output", file=sys.stderr)
-        sys.exit(1)
+    parser = ArgumentParser(description="Extract or generate table of contents from PDF files")
+    parser.add_argument("pdf_file", help="Path to the PDF file")
+    parser.add_argument("--json", action="store_true",
+                       help="Output as JSON instead of text")
+    parser.add_argument("--pretty", action="store_true",
+                       help="Pretty-print JSON output")
+    parser.add_argument("--generate-if-missing", "-g", action="store_true",
+                       help="Generate TOC for PDFs without bookmarks")
+    parser.add_argument("--confidence-threshold", "-c", type=float, default=0.7,
+                       help="Minimum confidence for generated TOC entries (0-1, default: 0.7)")
+    parser.add_argument("--quiet", "-q", action="store_true",
+                       help="Suppress warning messages")
 
-    # Parse arguments
-    pdf_path = sys.argv[-1]
-    output_json = '--json' in sys.argv
-    pretty_print = '--pretty' in sys.argv
+    args = parser.parse_args()
 
     # Extract TOC
-    toc = extract_pdf_toc(pdf_path)
+    auto_generate = args.generate_if_missing or args.confidence_threshold != 0.7
+    toc = extract_pdf_toc(
+        args.pdf_file,
+        auto_generate=auto_generate,
+        confidence_threshold=args.confidence_threshold,
+        quiet=args.quiet
+    )
 
     # Output result
-    if output_json:
-        print(toc_to_json(toc, pretty_print))
+    if args.json:
+        print(toc_to_json(toc, args.pretty))
     else:
-        print(toc_to_text(toc))
+        show_confidence = auto_generate and any('confidence' in item for item in toc)
+
+        # Add information about generation method
+        if auto_generate and toc:
+            print(f"Generated {len(toc)} TOC entries with confidence threshold {args.confidence_threshold}")
+        elif not auto_generate and not toc:
+            print("No bookmarks found in this PDF.")
+        elif toc:
+            print(f"Found {len(toc)} bookmarks in this PDF.")
+
+        out = toc_to_text(toc, show_confidence)
+        print(out)
 
 
 if __name__ == "__main__":
